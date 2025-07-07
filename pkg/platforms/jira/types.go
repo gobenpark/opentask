@@ -24,13 +24,25 @@ func (ji *JiraIssue) ToTask() *models.Task {
 		ID:          ji.Key,
 		Title:       ji.Fields.Summary,
 		Description: ji.Fields.Description,
-		Status:      convertJiraStatus(ji.Fields.Status.StatusCategory.Key),
-		Priority:    convertJiraPriority(ji.Fields.Priority.Name),
 		Platform:    models.PlatformJira,
 		ProjectID:   ji.Fields.Project.Key,
 		CreatedAt:   time.Time(ji.Fields.Created),
 		UpdatedAt:   time.Time(ji.Fields.Updated),
 		Metadata:    make(map[string]any),
+	}
+
+	// Set status
+	if ji.Fields.Status != nil {
+		task.Status = convertJiraStatus(ji.Fields.Status.StatusCategory.Key)
+	} else {
+		task.Status = models.StatusOpen // Default status
+	}
+
+	// Set priority
+	if ji.Fields.Priority != nil {
+		task.Priority = convertJiraPriority(ji.Fields.Priority.Name)
+	} else {
+		task.Priority = models.PriorityMedium // Default priority
 	}
 
 	// Set assignee
@@ -61,9 +73,13 @@ func (ji *JiraIssue) ToTask() *models.Task {
 	// Set metadata
 	task.Metadata["jira_id"] = ji.ID
 	task.Metadata["jira_self"] = ji.Self
-	task.Metadata["issue_type"] = ji.Fields.Type.Name
-	task.Metadata["status_name"] = ji.Fields.Status.Name
-	task.Metadata["status_category"] = ji.Fields.Status.StatusCategory.Key
+	if ji.Fields.Type.Name != "" {
+		task.Metadata["issue_type"] = ji.Fields.Type.Name
+	}
+	if ji.Fields.Status != nil {
+		task.Metadata["status_name"] = ji.Fields.Status.Name
+		task.Metadata["status_category"] = ji.Fields.Status.StatusCategory.Key
+	}
 	if ji.Fields.Priority != nil {
 		task.Metadata["priority_name"] = ji.Fields.Priority.Name
 	}
