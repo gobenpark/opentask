@@ -81,7 +81,7 @@ func (c *Client) CreateTask(ctx context.Context, task *models.Task) (*models.Tas
 	// Set project
 	if task.ProjectID != "" {
 		issueFields.Project = jira.Project{
-			Key: task.ProjectID,
+			ID: task.ProjectID,
 		}
 	} else {
 		return nil, platforms.NewPlatformError(
@@ -120,7 +120,7 @@ func (c *Client) CreateTask(ctx context.Context, task *models.Task) (*models.Tas
 		Fields: issueFields,
 	}
 
-	createdIssue, resp, err := c.client.Issue.Create(issue)
+	createdIssue, resp, err := c.client.Issue.CreateWithContext(ctx, issue)
 	if err != nil {
 		return nil, platforms.NewPlatformError(
 			platforms.ErrPlatformAPI,
@@ -190,7 +190,27 @@ func (c *Client) UpdateTask(ctx context.Context, task *models.Task) (*models.Tas
 		)
 	}
 
-	// Create update fields
+	// Get current issue to compare status
+	currentIssue, _, err := c.client.Issue.Get(jiraIDStr, nil)
+	if err != nil {
+		return nil, platforms.NewPlatformError(
+			platforms.ErrPlatformAPI,
+			"jira",
+			task.ID,
+			fmt.Errorf("failed to get current issue: %w", err),
+		)
+	}
+
+	// Update status via transition if needed
+	currentStatus := convertFromJiraStatus(currentIssue.Fields.Status.Name)
+	if currentStatus != task.Status {
+		err := c.transitionIssue(jiraIDStr, task.Status)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Create update fields for other properties
 	updateFields := &jira.IssueFields{
 		Summary:     task.Title,
 		Description: task.Description,
@@ -208,7 +228,7 @@ func (c *Client) UpdateTask(ctx context.Context, task *models.Task) (*models.Tas
 		updateFields.Labels = task.Labels
 	}
 
-	// Update the issue
+	// Update the issue fields
 	issue := &jira.Issue{
 		Key:    jiraIDStr,
 		Fields: updateFields,
@@ -374,7 +394,7 @@ func (c *Client) GetProject(ctx context.Context, id string) (*models.Project, er
 }
 
 func (c *Client) GetCurrentUser(ctx context.Context) (*models.User, error) {
-	user, resp, err := c.client.User.GetSelf()
+	user, resp, err := c.client.User.GetSelfWithContext(ctx)
 	if err != nil {
 		return nil, platforms.NewPlatformError(
 			platforms.ErrPlatformAPI,
@@ -419,6 +439,71 @@ func (c *Client) GetPlatformInfo() platforms.PlatformInfo {
 func (c *Client) HealthCheck(ctx context.Context) error {
 	_, err := c.GetCurrentUser(ctx)
 	return err
+}
+
+// convertFromJiraStatus converts Jira status name to our TaskStatus
+func convertFromJiraStatus(jiraStatus string) models.TaskStatus {
+	switch strings.ToLower(jiraStatus) {
+	case "to do", "open", "new", "created":
+		return models.StatusOpen
+	case "in progress", "in development", "doing":
+		return models.StatusInProgress
+	case "done", "closed", "resolved", "completed":
+		return models.StatusDone
+	case "cancelled", "canceled", "rejected":
+		return models.StatusCancelled
+	default:
+		return models.StatusOpen
+	}
+}
+
+// transitionIssue transitions a Jira issue to the specified status
+func (c *Client) transitionIssue(issueID string, targetStatus models.TaskStatus) error {
+	// Get available transitions
+	transitions, resp, err := c.client.Issue.GetTransitions(issueID)
+	if err != nil {
+		return platforms.NewPlatformError(
+			platforms.ErrPlatformAPI,
+			"jira",
+			issueID,
+			fmt.Errorf("failed to get transitions: %w", err),
+		)
+	}
+	defer resp.Body.Close()
+
+	// Find the transition that leads to the target status
+	targetJiraStatus := convertToJiraStatus(targetStatus)
+	var targetTransition *jira.Transition
+
+	for _, transition := range transitions {
+		if transition.To.Name == targetJiraStatus {
+			targetTransition = &transition
+			break
+		}
+	}
+
+	if targetTransition == nil {
+		return platforms.NewPlatformError(
+			platforms.ErrPlatformAPI,
+			"jira",
+			issueID,
+			fmt.Errorf("no transition available to status: %s", targetJiraStatus),
+		)
+	}
+
+	// Perform the transition
+	resp, err = c.client.Issue.DoTransition(issueID, targetTransition.ID)
+	if err != nil {
+		return platforms.NewPlatformError(
+			platforms.ErrPlatformAPI,
+			"jira",
+			issueID,
+			fmt.Errorf("failed to transition issue: %w", err),
+		)
+	}
+	defer resp.Body.Close()
+
+	return nil
 }
 
 // Helper function to build JQL query from filter

@@ -24,16 +24,17 @@ By default, tasks from all enabled platforms are shown.`,
 }
 
 var (
-	listPlatform string
-	listStatus   string
-	listAssignee string
-	listProject  string
-	listLabels   []string
-	listLimit    int
-	listOffset   int
-	listFormat   string
-	listAll      bool
-	listPlain    bool
+	listPlatform    string
+	listStatus      string
+	listAssignee    string
+	listProject     string
+	listLabels      []string
+	listLimit       int
+	listOffset      int
+	listFormat      string
+	listAll         bool
+	listPlain       bool
+	listAllProjects bool
 )
 
 func init() {
@@ -47,6 +48,7 @@ func init() {
 	listCmd.Flags().StringVarP(&listFormat, "format", "f", "table", "output format (table, json, csv)")
 	listCmd.Flags().BoolVar(&listAll, "all", false, "show tasks from all platforms")
 	listCmd.Flags().BoolVar(&listPlain, "plain", false, "disable interactive mode and output plain text")
+	listCmd.Flags().BoolVar(&listAllProjects, "all-projects", false, "show tasks from all projects (ignore default project)")
 }
 
 func runList(cmd *cobra.Command, args []string) error {
@@ -158,9 +160,8 @@ func createTaskFilter() *models.TaskFilter {
 		filter.Assignee = listAssignee
 	}
 
-	if listProject != "" {
-		filter.ProjectID = listProject
-	}
+	// Apply project filter logic
+	filter.ProjectID = determineProjectFilter()
 
 	if len(listLabels) > 0 {
 		filter.Labels = listLabels
@@ -169,50 +170,37 @@ func createTaskFilter() *models.TaskFilter {
 	return filter
 }
 
-func applyFilter(tasks []*models.Task, filter *models.TaskFilter) []*models.Task {
-	var filtered []*models.Task
-
-	for _, task := range tasks {
-		if filter.Platform != nil && task.Platform != *filter.Platform {
-			continue
-		}
-
-		if filter.Status != nil && task.Status != *filter.Status {
-			continue
-		}
-
-		if filter.ProjectID != "" && task.ProjectID != filter.ProjectID {
-			continue
-		}
-
-		if len(filter.Labels) > 0 {
-			hasAllLabels := true
-			for _, filterLabel := range filter.Labels {
-				found := false
-				for _, taskLabel := range task.Labels {
-					if taskLabel == filterLabel {
-						found = true
-						break
-					}
-				}
-				if !found {
-					hasAllLabels = false
-					break
-				}
-			}
-			if !hasAllLabels {
-				continue
-			}
-		}
-
-		filtered = append(filtered, task)
+func determineProjectFilter() string {
+	// Use explicit project flag if provided
+	if listProject != "" {
+		return listProject
 	}
 
-	return filtered
+	// Skip default project if --all-projects flag is set
+	if listAllProjects {
+		return ""
+	}
+
+	// Try to use default project from config
+	manager := config.NewManager()
+	if err := manager.Load(""); err == nil {
+		cfg := manager.GetConfig()
+		if cfg.Defaults.Project != "" {
+			return cfg.Defaults.Project
+		}
+	}
+
+	return ""
 }
 
 func printBubbleTasksTable(tasks []*models.Task) error {
-	m := NewTaskListModel(tasks, listPlain)
+	manager := config.NewManager()
+	if err := manager.Load(""); err != nil {
+		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+	cfg := manager.GetConfig()
+
+	m := NewTaskListModel(tasks, listPlain, cfg)
 
 	p := tea.NewProgram(m)
 	if _, err := p.Run(); err != nil {

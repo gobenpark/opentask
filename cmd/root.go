@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"opentask/cmd/project"
 	"opentask/cmd/task"
 
 	"github.com/charmbracelet/fang"
@@ -46,6 +47,7 @@ func init() {
 
 	// Add subcommands
 	rootCmd.AddCommand(task.TaskCmd)
+	rootCmd.AddCommand(project.ProjectCmd)
 }
 
 func initConfig() {

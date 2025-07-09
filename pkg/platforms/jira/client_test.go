@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -134,27 +135,42 @@ func TestNewClient(t *testing.T) {
 }
 
 func TestClient_CreateTask(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/rest/api/2/issue":
-			if r.Method == "POST" {
-				response := mockJiraIssue
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(response)
+	var url string
+	var email string
+	var token string
+	if os.Getenv("JIRA_TOKEN") == "" {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/rest/api/2/issue":
+				if r.Method == "POST" {
+					response := mockJiraIssue
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(response)
+				}
+			default:
+				w.WriteHeader(http.StatusNotFound)
 			}
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
+		}))
+		url = server.URL
+		email = "test@example.com"
+		token = "token123"
+		defer server.Close()
+	} else {
+		url = os.Getenv("JIRA_HOST")
+		email = os.Getenv("JIRA_EMAIL")
+		token = os.Getenv("JIRA_TOKEN")
+	}
 
 	config := Config{
-		BaseURL: server.URL,
-		Email:   "test@example.com",
-		Token:   "token123",
+		BaseURL: url,
+		Email:   email,
+		Token:   token,
 	}
 
 	client, err := NewClient(config)
+	require.NoError(t, err)
+
+	u, err := client.GetCurrentUser(context.TODO())
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -168,12 +184,12 @@ func TestClient_CreateTask(t *testing.T) {
 			task: &models.Task{
 				Title:       "Test Task",
 				Description: "Test Description",
-				ProjectID:   "TEST",
+				ProjectID:   "10000",
 				Priority:    models.PriorityMedium,
 				Labels:      []string{"test"},
 				Assignee: &models.User{
-					ID:       "user123",
-					Metadata: map[string]any{"jira_account_id": "user123"},
+					ID:       u.ID,
+					Metadata: u.Metadata,
 				},
 			},
 			expectError: false,
@@ -204,8 +220,9 @@ func TestClient_CreateTask(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 				assert.NotNil(t, createdTask)
-				assert.Equal(t, "TEST-123", createdTask.ID)
-				assert.Equal(t, "Test Issue", createdTask.Title)
+				assert.NotEmpty(t, createdTask.ID)
+
+				assert.Equal(t, "Test Task", createdTask.Title)
 				assert.Equal(t, models.PlatformJira, createdTask.Platform)
 			}
 		})
@@ -213,26 +230,37 @@ func TestClient_CreateTask(t *testing.T) {
 }
 
 func TestClient_GetTask(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/rest/api/2/issue/TEST-123":
-			if r.Method == "GET" {
-				response := mockJiraIssue
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(response)
+
+	var url string
+	var email string
+	var token string
+	if os.Getenv("JIRA_TOKEN") == "" {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/rest/api/2/issue":
+				if r.Method == "POST" {
+					response := mockJiraIssue
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(response)
+				}
+			default:
+				w.WriteHeader(http.StatusNotFound)
 			}
-		case "/rest/api/2/issue/NOT-FOUND":
-			w.WriteHeader(http.StatusNotFound)
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
+		}))
+		url = server.URL
+		email = "test@example.com"
+		token = "token123"
+		defer server.Close()
+	} else {
+		url = os.Getenv("JIRA_HOST")
+		email = os.Getenv("JIRA_EMAIL")
+		token = os.Getenv("JIRA_TOKEN")
+	}
 
 	config := Config{
-		BaseURL: server.URL,
-		Email:   "test@example.com",
-		Token:   "token123",
+		BaseURL: url,
+		Email:   email,
+		Token:   token,
 	}
 
 	client, err := NewClient(config)

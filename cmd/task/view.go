@@ -1,9 +1,12 @@
 package task
 
 import (
+	"context"
 	"fmt"
+	"opentask/pkg/config"
 	"opentask/pkg/models"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -25,15 +28,19 @@ type viewState int
 const (
 	viewList viewState = iota
 	viewDetail
+	viewDeleteConfirm
 )
 
 type model struct {
-	table        table.Model
-	viewport     viewport.Model
-	plain        bool
-	tasks        []*models.Task
-	currentView  viewState
-	selectedTask *models.Task
+	table         table.Model
+	viewport      viewport.Model
+	plain         bool
+	tasks         []*models.Task
+	currentView   viewState
+	selectedTask  *models.Task
+	config        *config.Config
+	deleteTask    *models.Task
+	deleteMessage string
 }
 
 func (m model) Init() tea.Cmd {
@@ -59,13 +66,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.currentView = viewList
 				return m, nil
 			}
+			if m.currentView == viewDeleteConfirm {
+				m.currentView = viewList
+				m.deleteTask = nil
+				m.deleteMessage = ""
+				return m, nil
+			}
 			if m.table.Focused() {
 				m.table.Blur()
 			} else {
 				m.table.Focus()
 			}
-		case "r":
-			return m, nil
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "enter":
@@ -83,6 +94,64 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
+		case "d":
+			if m.currentView == viewList {
+				selectedRow := m.table.SelectedRow()
+				if len(selectedRow) > 0 {
+					taskID := selectedRow[0]
+					for _, task := range m.tasks {
+						if task.ID == taskID {
+							m.deleteTask = task
+							m.currentView = viewDeleteConfirm
+							return m, nil
+						}
+					}
+				}
+			} else if m.currentView == viewDetail && m.selectedTask != nil {
+				m.deleteTask = m.selectedTask
+				m.currentView = viewDeleteConfirm
+				return m, nil
+			}
+		case "y":
+			if m.currentView == viewDeleteConfirm && m.deleteTask != nil {
+				return m.confirmDelete()
+			}
+		case "n":
+			if m.currentView == viewDeleteConfirm {
+				m.currentView = viewList
+				m.deleteTask = nil
+				m.deleteMessage = ""
+				return m, nil
+			}
+		case "1":
+			if m.currentView == viewList {
+				return m.updateSelectedTaskStatus("open")
+			} else if m.currentView == viewDetail && m.selectedTask != nil {
+				return m.updateTaskStatus("open")
+			}
+		case "2":
+			if m.currentView == viewList {
+				return m.updateSelectedTaskStatus("in_progress")
+			} else if m.currentView == viewDetail && m.selectedTask != nil {
+				return m.updateTaskStatus("in_progress")
+			}
+		case "3":
+			if m.currentView == viewList {
+				return m.updateSelectedTaskStatus("done")
+			} else if m.currentView == viewDetail && m.selectedTask != nil {
+				return m.updateTaskStatus("done")
+			}
+		case "4":
+			if m.currentView == viewList {
+				return m.updateSelectedTaskStatus("cancelled")
+			} else if m.currentView == viewDetail && m.selectedTask != nil {
+				return m.updateTaskStatus("cancelled")
+			}
+		case "r":
+			if m.currentView == viewList {
+				return m.refreshTasks()
+			}
+			return m, nil
 		}
 	}
 
@@ -104,8 +173,10 @@ func (m model) View() string {
 	switch m.currentView {
 	case viewDetail:
 		return m.renderTaskDetail()
+	case viewDeleteConfirm:
+		return m.renderDeleteConfirm()
 	default:
-		return baseStyle.Render(m.table.View()) + "\n" + "Press Enter to view task details • Press q to quit"
+		return baseStyle.Render(m.table.View()) + "\n" + "Enter: details • d:delete • 1:open 2:in_progress 3:done 4:cancelled • r:refresh • q:quit"
 	}
 }
 
@@ -172,7 +243,7 @@ func (m model) renderTaskDetail() string {
 	footer := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("241")).
 		MarginTop(1).
-		Render("↑↓ scroll • ESC to go back • q to quit")
+		Render("↑↓ scroll • d:delete • 1:open 2:in_progress 3:done 4:cancelled • ESC back • q quit")
 
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
@@ -182,11 +253,11 @@ func (m model) renderTaskDetail() string {
 	)
 }
 
-func NewTaskListModel(tasks []*models.Task, plain bool) model {
+func NewTaskListModel(tasks []*models.Task, plain bool, cfg *config.Config) model {
 	columns := []table.Column{
 		{Title: "ID", Width: 4},
 		{Title: "PLATFORM", Width: 10},
-		{Title: "STATUS", Width: 10},
+		{Title: "STATUS", Width: 12},
 		{Title: "PRIORITY", Width: 10},
 		{Title: "TITLE", Width: 50},
 		{Title: "ASSIGNEE", Width: 10},
@@ -212,7 +283,7 @@ func NewTaskListModel(tasks []*models.Task, plain bool) model {
 		table.WithColumns(columns),
 		table.WithRows(rows),
 		table.WithFocused(true),
-		table.WithHeight(7),
+		table.WithHeight(10),
 	)
 
 	s := table.DefaultStyles()
@@ -235,5 +306,279 @@ func NewTaskListModel(tasks []*models.Task, plain bool) model {
 		plain:       plain,
 		tasks:       tasks,
 		currentView: viewList,
+		config:      cfg,
 	}
+}
+
+func (m model) updateTaskStatus(statusStr string) (tea.Model, tea.Cmd) {
+	if m.selectedTask == nil {
+		return m, nil
+	}
+
+	status := models.TaskStatus(statusStr)
+	if !status.IsValid() {
+		return m, nil
+	}
+
+	// Load configuration to find platform client
+	manager := config.NewManager()
+	if err := manager.Load(""); err != nil {
+		return m, nil
+	}
+
+	cfg := manager.GetConfig()
+	platformName := string(m.selectedTask.Platform)
+	platform, exists := cfg.GetPlatform(platformName)
+	if !exists || !platform.Enabled {
+		return m, nil
+	}
+
+	// Create platform client
+	client, err := createPlatformClient(platformName, platform)
+	if err != nil {
+		return m, nil
+	}
+
+	// Update task status
+	originalStatus := m.selectedTask.Status
+	m.selectedTask.SetStatus(status)
+
+	// Update task via API
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	updatedTask, err := client.UpdateTask(ctx, m.selectedTask)
+	if err != nil {
+		// Revert status on error
+		m.selectedTask.SetStatus(originalStatus)
+		return m, nil
+	}
+
+	// Update the task in our local list
+	for i, task := range m.tasks {
+		if task.ID == updatedTask.ID {
+			m.tasks[i] = updatedTask
+			m.selectedTask = updatedTask
+			break
+		}
+	}
+
+	// Refresh the viewport content
+	m.viewport.SetContent(m.formatTaskDetail())
+
+	return m, nil
+}
+
+func (m model) updateSelectedTaskStatus(statusStr string) (tea.Model, tea.Cmd) {
+	selectedRow := m.table.SelectedRow()
+	if len(selectedRow) == 0 {
+		return m, nil
+	}
+
+	taskID := selectedRow[0]
+	var targetTask *models.Task
+
+	for _, task := range m.tasks {
+		if task.ID == taskID {
+			targetTask = task
+			break
+		}
+	}
+
+	if targetTask == nil {
+		return m, nil
+	}
+
+	status := models.TaskStatus(statusStr)
+	if !status.IsValid() {
+		return m, nil
+	}
+
+	platformName := string(targetTask.Platform)
+	platform, exists := m.config.GetPlatform(platformName)
+	if !exists || !platform.Enabled {
+		return m, nil
+	}
+
+	// Create platform client
+	client, err := createPlatformClient(platformName, platform)
+	if err != nil {
+		return m, nil
+	}
+
+	// Update task status
+	originalStatus := targetTask.Status
+	targetTask.SetStatus(status)
+
+	// Update task via API
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	updatedTask, err := client.UpdateTask(ctx, targetTask)
+	if err != nil {
+		// Revert status on error
+		targetTask.SetStatus(originalStatus)
+		return m, nil
+	}
+
+	// Update the task in our local list
+	for i, task := range m.tasks {
+		if task.ID == updatedTask.ID {
+			m.tasks[i] = updatedTask
+			break
+		}
+	}
+
+	// Refresh the table
+	m = m.refreshTable()
+
+	return m, nil
+}
+
+func (m model) refreshTasks() (tea.Model, tea.Cmd) {
+	if m.config == nil {
+		return m, nil
+	}
+
+	platforms := m.config.GetEnabledPlatforms()
+	var allTasks []*models.Task
+
+	for _, platformName := range platforms {
+		platform, exists := m.config.GetPlatform(platformName)
+		if !exists || !platform.Enabled {
+			continue
+		}
+
+		client, err := createPlatformClient(platformName, platform)
+		if err != nil {
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		// Use a basic filter for refresh
+		filter := &models.TaskFilter{
+			Limit: 100, // Get more tasks for refresh
+		}
+
+		tasks, err := client.ListTasks(ctx, filter)
+		if err != nil {
+			continue
+		}
+
+		allTasks = append(allTasks, tasks...)
+	}
+
+	// Update model with new tasks
+	m.tasks = allTasks
+	m = m.refreshTable()
+
+	return m, nil
+}
+
+func (m model) refreshTable() model {
+	rows := make([]table.Row, len(m.tasks))
+	for i, task := range m.tasks {
+		assignee := "none"
+		if task.Assignee != nil {
+			assignee = task.Assignee.Name
+		}
+		rows[i] = table.Row{
+			task.ID,
+			task.Platform.String(),
+			task.Status.String(),
+			task.Priority.String(),
+			task.Title,
+			assignee,
+		}
+	}
+
+	m.table.SetRows(rows)
+	return m
+}
+
+func (m model) renderDeleteConfirm() string {
+	if m.deleteTask == nil {
+		return "No task selected for deletion"
+	}
+
+	style := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("196")).
+		Padding(1, 2).
+		MarginTop(5).
+		MarginLeft(10)
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("196"))
+
+	content := fmt.Sprintf(
+		"%s\n\n%s\n\n%s\n\n%s",
+		titleStyle.Render("⚠ Delete Task"),
+		fmt.Sprintf("Are you sure you want to delete this task?"),
+		fmt.Sprintf("ID: %s\nTitle: %s", m.deleteTask.ID, m.deleteTask.Title),
+		"Press 'y' to confirm, 'n' to cancel, or ESC to go back",
+	)
+
+	if m.deleteMessage != "" {
+		content += fmt.Sprintf("\n\n%s", m.deleteMessage)
+	}
+
+	return style.Render(content)
+}
+
+func (m model) confirmDelete() (tea.Model, tea.Cmd) {
+	if m.deleteTask == nil {
+		return m, nil
+	}
+
+	// Find platform for the task
+	platformName := string(m.deleteTask.Platform)
+	platform, exists := m.config.GetPlatform(platformName)
+	if !exists || !platform.Enabled {
+		m.deleteMessage = "Platform not found or not enabled"
+		return m, nil
+	}
+
+	// Create platform client
+	client, err := createPlatformClient(platformName, platform)
+	if err != nil {
+		m.deleteMessage = fmt.Sprintf("Failed to create client: %v", err)
+		return m, nil
+	}
+
+	// Delete task via API
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err = client.DeleteTask(ctx, m.deleteTask.ID)
+	if err != nil {
+		m.deleteMessage = fmt.Sprintf("Failed to delete task: %v", err)
+		return m, nil
+	}
+
+	// Remove task from local list
+	for i, task := range m.tasks {
+		if task.ID == m.deleteTask.ID {
+			m.tasks = append(m.tasks[:i], m.tasks[i+1:]...)
+			break
+		}
+	}
+
+	// Clear selected task if it was the one being deleted
+	if m.selectedTask != nil && m.selectedTask.ID == m.deleteTask.ID {
+		m.selectedTask = nil
+	}
+
+	// Reset delete state
+	m.deleteTask = nil
+	m.deleteMessage = ""
+	m.currentView = viewList
+
+	// Refresh the table
+	m = m.refreshTable()
+
+	return m, nil
 }

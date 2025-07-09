@@ -20,17 +20,21 @@ type JiraUser jira.User
 
 // Conversion methods to unified models
 func (ji *JiraIssue) ToTask() *models.Task {
+
 	task := &models.Task{
-		ID:          ji.Key,
-		Title:       ji.Fields.Summary,
-		Description: ji.Fields.Description,
-		Platform:    models.PlatformJira,
-		ProjectID:   ji.Fields.Project.Key,
-		CreatedAt:   time.Time(ji.Fields.Created),
-		UpdatedAt:   time.Time(ji.Fields.Updated),
-		Metadata:    make(map[string]any),
+		ID:       ji.Key,
+		Platform: models.PlatformJira,
+		Metadata: make(map[string]any),
 	}
 
+	if ji.Fields == nil {
+		return task
+	}
+	task.Title = ji.Fields.Summary
+	task.Description = ji.Fields.Description
+	task.ProjectID = ji.Fields.Project.Key
+	task.CreatedAt = time.Time(ji.Fields.Created)
+	task.UpdatedAt = time.Time(ji.Fields.Updated)
 	// Set status
 	if ji.Fields.Status != nil {
 		task.Status = convertJiraStatus(ji.Fields.Status.StatusCategory.Key)

@@ -15,4 +15,5 @@ This command provides subcommands for creating, listing, updating, and deleting 
 func init() {
 	TaskCmd.AddCommand(createCmd)
 	TaskCmd.AddCommand(listCmd)
+	TaskCmd.AddCommand(updateCmd)
 }
